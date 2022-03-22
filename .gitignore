@@ -42,3 +42,6 @@ src/*.pdf
 
 # Mac OS X
 .DS_Store
+
+# Data
+data/raw/*
