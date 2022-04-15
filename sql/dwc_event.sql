@@ -5,7 +5,7 @@ Created by Peter Desmet (INBO)
 SELECT
 -- RECORD LEVEL
   'Event'                               AS type,
-  REPLACE(REPLACE(updated_at," UTC", "Z"), " ", "T") AS modified,
+  REPLACE(REPLACE(updated_at,' UTC', 'Z'), ' ', 'T') AS modified,
 --  NULL                                  AS license,
 --  NULL                                  AS rightsHolder,
 --  NULL                                  AS datasetID,
