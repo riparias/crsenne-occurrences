@@ -8,7 +8,7 @@ This repository contains the functionality to standardize the data of the [Contr
 
 ## Workflow
 
-source data → Darwin Core [mapping script](src/dwc_mapping.Rmd) → generated [Darwin Core files](data/processed)
+source data → Darwin Core [mapping script](src/dwc_mapping.Rmd) using [SQL](SQL) → generated [Darwin Core files](data/processed)
 
 ## Published dataset
 
