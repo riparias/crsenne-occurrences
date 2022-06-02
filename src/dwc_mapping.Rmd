@@ -24,7 +24,7 @@ Install required libraries (if not yet installed):
 
 ```{r}
 installed <- rownames(installed.packages())
-required <- c("magrittr", "here", "glue", "readr", "DBI")
+required <- c("magrittr", "here", "glue", "readr", "DBI","stringr","sp","rworldmap")
 if (!all(required %in% installed)) {
   install.packages(required[!required %in% installed])
 }
@@ -38,6 +38,7 @@ library(here)           # To find files
 library(glue)           # To insert variables in strings
 library(readr)          # To write files
 library(DBI)            # To create and query databases
+library(rworldmap)      # To project final coordinates
 ```
 
 # Read source data
@@ -46,39 +47,210 @@ Read source files:
 
 ```{r}
 # All columns are read as characters for easier import into SQLite
+#Raw Data export:
 data <- readr::read_csv(here::here("data", "raw", "inventaire_riparias.csv"), col_types = cols(.default = "c"))
+#List of species that are targetted by each survey module -- Used to create absence records:
+modules_species <- readr::read_csv(here::here("data", "raw", "Modules_species.csv"), col_types = cols(.default = "c"))
+#Reviewed Mapping of raw species names to valid taxa:
+names_mapping_RVBCRS <- readr::read_csv(here::here( "data","raw", "Names_mapping_RVBCRS.csv"), col_types = cols(.default = "c"))
 ```
 
-## Create database
+# Create database
 
 Create a SQLite database with the source data, so it can be queried with SQL in the next steps:
 
 ```{r}
-db <- DBI::dbConnect(RSQLite::SQLite(), ":memory:")
+db <- DBI::dbConnect(RSQLite::SQLite(), ":memory:",loadable.extensions = TRUE)
 
 # Import data
-DBI::dbWriteTable(db, "data", data)
+DBI::dbWriteTable(db, "inventaire", data)
+DBI::dbWriteTable(db, "modules_species", modules_species)
+DBI::dbWriteTable(db, "names_mapping_RVBCRS", names_mapping_RVBCRS)
 ```
 
-## Darwin Core mapping
+# Data preparation
+
+Raw export needs a few cleaning steps before we can generate DarwinCore files.
+
+*   raw species names are spread among 9 different columns
+*   each record among these can include multiple names
+*   names used are not always fit to match scientific name
+
+## Gather raw inputs that include species names
+
+Raw observation inputs from the 9 different columns are gathered within a single table column.
+
+```{r}
+extract_raw_records_sql <- glue::glue_sql(readr::read_file(here::here("sql", "extract_raw_records.sql")), .con = db)
+DBI::dbExecute(db, extract_raw_records_sql)
+```
+
+These raw inputs still include multiple observations for different species, separated by "," (EG *"Ceratophyllum demersum,Lemna minor (et al.),Hydrocharis morsus-ranae"*).These should detached from each others and turned into single-species occurrence records.
+
+## Disaggregate raw observation inputs into single-species records
+
+This step requires to use a temporary table:
+
+```{r}
+parsing_temporary_table_sql <- glue::glue_sql(readr::read_file(here::here("sql", "parsing_temporary_table.sql")), .con = db)
+DBI::dbExecute(db, parsing_temporary_table_sql)
+```
+
+Isolated names (EG *"Ceratophyllum demersum","plantain d'eau"*) are stored in the table 'parsed_names'.
+
+```{r}
+parsing_records_sql <- glue::glue_sql(readr::read_file(here::here("sql", "parsing_records.sql")), .con = db)
+DBI::dbExecute(db, parsing_records_sql)
+```
+
+## Mapping isolated names to reviewed valid taxon names
+
+Observations are not always using valid scientific names (EG *"jonc fleuri", "plantain d'eau", "populace", "trèfle d'eau", "thypha sp.", "Nymphaea sp."*). These raw names will be matched to a GBIF & CR SENNE-reviewed species list. 
+
+**This step is important** as absences will be determined as *"Species specifically targeted by the sampling event that do not fit any of the observations made during that event"*.  
+
+### Reformatting raw names inputs
+
+To ensure efficient joint of raw input names to reviewed taxon names provided by CRS, some minor queries must run:
+
+```{r}
+# Functions allowing to read SQL file including multiple statements.
+# credits @https://stackoverflow.com/users/1144966/petermeissner
+sqlFromFile <- function(file){
+    require(stringr)
+    sql <- readLines(file)
+    sql <- unlist(str_split(paste(sql,collapse=" "),";"))
+    sql <- sql[grep("^ *$", sql, invert=T)]
+    sql
+}
+
+# apply query function to each element
+dbSendQueries <- function(con,sql){
+    dummyfunction <- function(sql,con){
+        dbSendQuery(con,sql)
+    }
+    lapply(sql, dummyfunction, con)
+}
+```
+
+```{r include=FALSE}
+#queries
+dbSendQueries( db,sqlFromFile("../sql/cleaning_parsed_names.sql"))
+```
+
+### Run scientific names Mapping
+
+raw isolated observation names are mapped to scientific names from the reference species list (*data/raw/names_mapping_RVBCRS*) .
+
+```{r}
+dbSendQueries( db, sqlFromFile("../sql/mapping_taxonomy.sql"))
+```
+
+### Validation of the scientific names mapping
+
+This query will return any isolated observation that has no corresponding with the taxonomic list (*data/raw/names_mapping_RVBCRS*). 
+
+**Any name returned below should be added to this latest file** 
+
+```{r echo=FALSE}
+res<-dbSendQuery(db,"SELECT name, Orig,champ FROM parsed_names WHERE name NOT IN (SELECT orig FROM Names_mapping_RVBCRS) GROUP BY name;")
+dbFetch(res) 
+```
+
+## Darwin Core mappings
 
 Create [Event](https://rs.gbif.org/core/dwc_event_2022-02-02.xml) core:
 
 ```{r}
 dwc_event_sql <- glue::glue_sql(readr::read_file(here::here("sql", "dwc_event.sql")), .con = db)
-dwc_event <- DBI::dbGetQuery(db, dwc_event_sql)
+dwc_events <- DBI::dbGetQuery(db, dwc_event_sql)
 ```
 
 Create [Occurrence](https://rs.gbif.org/core/dwc_occurrence_2022-02-02.xml) extension:
 
 ```{r}
 dwc_occurrence_sql <- glue::glue_sql(readr::read_file(here::here("sql", "dwc_occurrence.sql")), .con = db)
-dwc_occurrence <- DBI::dbGetQuery(db, dwc_occurrence_sql)
+dwc_occurrences<- DBI::dbGetQuery(db, dwc_occurrence_sql)
 ```
 
-## Save data to CSV
+
+# Data resume
+
+## Observations trends
+
+Some returns might be worth to have a look at:
+
+```{r include=FALSE}
+dbSendQueries( db, sqlFromFile("../sql/trends.sql"))
+```
+```{r include=FALSE}
+Status_trends <-DBI::dbGetQuery(db, "SELECT * FROM Status_trends ;")
+observed_introduced_species<-DBI::dbGetQuery(db, "SELECT * FROM observed_introduced_species; ")
+metadata_trends<-DBI::dbGetQuery(db,"SELECT * FROM metadata_trends;")
+missing_introduced_species<-DBI::dbGetQuery(db, "SELECT * FROM missing_introduced_species; ")
+other_observed_species<-DBI::dbGetQuery(db,"SELECT * FROM other_observed_species;")
+dwc_occurrences<-DBI::dbGetQuery(db, "SELECT * FROM dwc_occurrences; ")
+dwc_events<-DBI::dbGetQuery(db, "SELECT * FROM dwc_events; ")
+```
+
+presence/absence trends per taxa:
+
+```{r echo=FALSE}
+Status_trends
+```
+
+Exotic Species that are observed at least once during a targeted survey:
+
+```{r echo=FALSE}
+observed_introduced_species
+```
+
+Exotic Species that has never been observed during surveys targeting them (might be observed during other surveys):
+
+```{r echo=FALSE}
+missing_introduced_species
+```
+
+Species out of the watch lists that were observed:
+
+```{r echo=FALSE}
+other_observed_species
+```
+
+
+## Metadata-filling info:
+
+
+```{r echo=FALSE}
+metadata_trends
+```
+
+## Georeferencing 
+
+```{r echo=FALSE}
+#install.packages(rworldmap)
+newmap <- getMap(resolution = "high")
+plot(newmap, xlim = c(3, 3), ylim = c(45, 55), asp = 1)
+points(dwc_events$decimalLongitude, dwc_events$decimalLatitude, col = "blue", cex = .1)
+
+
+plot(newmap, xlim = c(3, 3), ylim = c(49.5, 52), asp = 1)
+points(dwc_events$decimalLongitude, dwc_events$decimalLatitude, col = "blue", cex = .1)
+
+
+```
+
+# Data exports
 
 ```{r}
-write_csv(dwc_event, here::here("data", "processed", "event.csv"), na = "")
-write_csv(dwc_occurrence, here::here("data", "processed", "occurrence.csv"), na = "")
+#Dwc Events
+write_csv(dwc_events, here::here("data", "processed", "event.csv"), na = "")
+#Dwc Occurrences
+write_csv(dwc_occurrences, here::here("data", "processed", "occurrence.csv"), na = "")
+```
+
+***
+
+```{r}
+dbDisconnect(db)
 ```
