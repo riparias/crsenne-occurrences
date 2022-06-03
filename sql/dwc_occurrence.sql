@@ -4,7 +4,7 @@ SELECT
 /*1. IMPORTING PRESENCE / ABSENCES FOR SPECIES TARGETTED BY SPECIFIC SURVEYS*/
 --OCCURRENCE
   I.fulcrum_id                                                  AS eventID,
-  'HumanObservation'                                            AS bAsisOfRecord,
+  'HumanObservation'                                            AS basisOfRecord,
   I.observateurs                                                AS recordedBy,
   I.fulcrum_id||'-'||M.scientificName                           AS occurrenceID, -- using names harmonized by GBIF, should remain stable if the raw input names change in the future... I.fulcrum_id||'-'||substr(sha1(M.scientificName),1,5) failed to load sha1 with dbi...
 
